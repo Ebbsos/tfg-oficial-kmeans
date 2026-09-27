@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 from kneed import KneeLocator
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import adjusted_rand_score, silhouette_samples, silhouette_score
 from sklearn.preprocessing import RobustScaler
 from sqlalchemy import create_engine
 
@@ -480,6 +480,88 @@ def graficar_pca(X_final, df, kmeans, ruta):
 
 
 # =============================================================================
+# VALIDACIÓN: SILUETA POR CLÚSTER Y ESTABILIDAD
+# =============================================================================
+def silueta_por_cluster(X_final, labels):
+    valores = pd.DataFrame({"cluster": labels, "silueta": silhouette_samples(X_final, labels)})
+
+    tabla = valores.groupby("cluster")["silueta"].agg(
+        cantidad_clientes="size",
+        silueta_media="mean",
+        silueta_mediana="median",
+        porcentaje_negativos=lambda s: (s < 0).mean() * 100
+    ).round(4)
+
+    print("\nSilueta por clúster:")
+    print(tabla)
+    return tabla
+
+
+def jaccard_por_cluster(labels_base, labels_nuevas):
+    # Para cada clúster original, el mayor Jaccard contra algún clúster de la nueva partición
+    resultado = {}
+    for c in np.unique(labels_base):
+        miembros = labels_base == c
+        resultado[c] = max(
+            (miembros & (labels_nuevas == j)).sum() / (miembros | (labels_nuevas == j)).sum()
+            for j in np.unique(labels_nuevas)
+        )
+    return resultado
+
+
+def evaluar_estabilidad(X_final, k, n_semillas=10, n_submuestras=20, fraccion=0.8):
+    base = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=N_INIT).fit_predict(X_final)
+    filas = []
+
+    # 1. Sensibilidad a la inicialización: otras semillas, todos los clientes
+    for semilla in range(1, n_semillas + 1):
+        labels = KMeans(n_clusters=k, random_state=semilla, n_init=N_INIT).fit_predict(X_final)
+        filas.append({"k": k, "prueba": "semilla", "repeticion": semilla,
+                      "ari": adjusted_rand_score(base, labels),
+                      **{f"jaccard_cluster_{c}": v for c, v in jaccard_por_cluster(base, labels).items()}})
+
+    # 2. Sensibilidad a los datos: se entrena con una submuestra y se asigna a todos los clientes
+    rng = np.random.default_rng(RANDOM_STATE)
+    tamano = int(fraccion * len(X_final))
+    for i in range(1, n_submuestras + 1):
+        idx = rng.choice(len(X_final), size=tamano, replace=False)
+        modelo = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=N_INIT).fit(X_final.iloc[idx])
+        labels = modelo.predict(X_final)
+        filas.append({"k": k, "prueba": "submuestra", "repeticion": i,
+                      "ari": adjusted_rand_score(base, labels),
+                      **{f"jaccard_cluster_{c}": v for c, v in jaccard_por_cluster(base, labels).items()}})
+
+    return pd.DataFrame(filas)
+
+
+def validar_estabilidad(X_final, k_final, k_comparar=(2, 3, 4)):
+    detalle = pd.concat(
+        [evaluar_estabilidad(X_final, k) for k in sorted(set(k_comparar) | {k_final})],
+        ignore_index=True
+    )
+
+    resumen = detalle.groupby(["k", "prueba"])["ari"].agg(
+        ari_media="mean", ari_desv="std", ari_min="min", ari_max="max", repeticiones="size"
+    ).round(4)
+
+    columnas_jaccard = [c for c in detalle.columns if c.startswith("jaccard_cluster_")]
+    jaccard = (
+        detalle[detalle["k"] == k_final]
+        .groupby("prueba")[columnas_jaccard]
+        .agg(["mean", "min"])
+        .dropna(axis=1, how="all")
+        .round(4)
+    )
+
+    print("\nEstabilidad (ARI respecto al modelo con random_state=42):")
+    print(resumen)
+    print(f"\nEstabilidad por clúster con k = {k_final} (índice de Jaccard):")
+    print(jaccard)
+
+    return detalle.round(4), resumen, jaccard
+
+
+# =============================================================================
 # EXPORTAR MUESTRA DE X_final COMO IMAGEN
 # =============================================================================
 def exportar_muestra_xfinal(X_final, ruta):
@@ -551,6 +633,13 @@ def main():
     graficar_pca(X_final, df, kmeans, salida / "03_pca_clusters.png")
     exportar_muestra_xfinal(X_final, salida / "04_xfinal_muestra.png")
 
+    silueta_clusters = silueta_por_cluster(X_final, kmeans.labels_)
+    estabilidad_detalle, estabilidad_resumen, estabilidad_jaccard = validar_estabilidad(X_final, k_final)
+
+    silueta_clusters.to_csv(salida / "silueta_por_cluster.csv")
+    estabilidad_detalle.to_csv(salida / "estabilidad_detalle.csv", index=False)
+    estabilidad_resumen.to_csv(salida / "estabilidad_resumen.csv")
+    estabilidad_jaccard.to_csv(salida / "estabilidad_jaccard.csv")
     resultados.to_csv(salida / "metricas_k.csv", index=False)
     resumen_clusters.to_csv(salida / "resumen_clusters.csv")
     tabla_clusters.to_csv(salida / "detalle_clusters.csv")
