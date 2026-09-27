@@ -2,14 +2,26 @@
 Segmentación de clientes con K-Means (método del codo + silhouette).
 
 Versión en script del notebook elbow-kmeans-silluethe.ipynb.
+
+Uso:
+    python main.py --salida src/ejecucion_2
+
+Las credenciales de MySQL se leen de variables de entorno o de un archivo .env
+(ver .env.example).
 """
 
+import argparse
 import os
 from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")  # Los gráficos se guardan en archivos, no se muestran en pantalla
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
 from kneed import KneeLocator
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
@@ -20,21 +32,73 @@ from sqlalchemy import create_engine
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 200)
 
+RANDOM_STATE = 42
+N_INIT = 20
+K_VALUES = list(range(1, 11))
+
+# silhouette_score es O(n²) en memoria y tiempo; por encima de este número de
+# clientes se calcula sobre una muestra aleatoria.
+SILHOUETTE_SAMPLE_SIZE = 10000
+
+# Variables numéricas usadas en el clustering
+variables_cluster = [
+    "recencia",
+    "frecuencia_compra",
+    "monto_total",
+    "variedad_productos",
+    "cantidad_categorias_distintas",
+    "cantidad_marcas_distintas",
+    "porcentaje_monto_categoria_top",
+    "porcentaje_monto_marca_top"
+]
+
+# Variables muy sesgadas a las que se aplica log1p
+variables_log = [
+    "recencia",
+    "frecuencia_compra",
+    "monto_total",
+    "variedad_productos",
+    "cantidad_categorias_distintas",
+    "cantidad_marcas_distintas"
+]
+
+# Porcentajes que quedan NULL si el cliente no tiene productos con categoría/marca
+variables_porcentaje = [
+    "porcentaje_monto_categoria_top",
+    "porcentaje_monto_marca_top"
+]
+
+# Variables categóricas: no entran en el clustering, se usan para describir los clústeres
+variables_descriptivas = {
+    "canal": "canal_predominante",
+    "localidad": "localidad_predominante",
+    "categoria_predominante": "categoria_predominante_cluster",
+    "marca_predominante": "marca_predominante_cluster"
+}
+
 
 # =============================================================================
 # CONEXIÓN A MYSQL
 # =============================================================================
-# Valores por defecto iguales a los del notebook; se pueden sobrescribir con
-# variables de entorno.
-usuario = os.getenv("DB_USER", "root")
-password = os.getenv("DB_PASSWORD", "root")
-host = os.getenv("DB_HOST", "localhost")
-puerto = os.getenv("DB_PORT", "3306")
-base = os.getenv("DB_NAME", "renacertfg")
+def crear_engine():
+    load_dotenv()
 
-engine = create_engine(f"mysql+pymysql://{usuario}:{password}@{host}:{puerto}/{base}")
+    usuario = os.getenv("DB_USER")
+    password = os.getenv("DB_PASSWORD")
+    if not usuario or not password:
+        raise SystemExit(
+            "Faltan las credenciales de MySQL. Define DB_USER y DB_PASSWORD "
+            "como variables de entorno o en un archivo .env (ver .env.example)."
+        )
 
-print("Conexión creada correctamente")
+    host = os.getenv("DB_HOST", "localhost")
+    puerto = os.getenv("DB_PORT", "3306")
+    base = os.getenv("DB_NAME", "renacertfg")
+
+    engine = create_engine(f"mysql+pymysql://{usuario}:{password}@{host}:{puerto}/{base}")
+
+    print("Conexión creada correctamente")
+    return engine
 
 
 # =============================================================================
@@ -74,8 +138,6 @@ WITH base AS (
 rfm AS (
     SELECT
         cliente_id,
-        MAX(localidad_id) AS localidad_id,
-        MAX(canal_id) AS canal_id,
         DATEDIFF('2024-12-31', MAX(fecha)) AS recencia,
         COUNT(DISTINCT CONCAT(
             COALESCE(documento_id, ''), '-',
@@ -88,6 +150,31 @@ rfm AS (
         COUNT(DISTINCT marca_id) AS cantidad_marcas_distintas
     FROM base
     GROUP BY cliente_id
+),
+
+-- Localidad y canal predominantes: los de mayor monto de compra del cliente
+localidad_top AS (
+    SELECT
+        cliente_id,
+        localidad_id,
+        ROW_NUMBER() OVER (
+            PARTITION BY cliente_id
+            ORDER BY SUM(neto_con_imp) DESC, localidad_id
+        ) AS rn
+    FROM base
+    GROUP BY cliente_id, localidad_id
+),
+
+canal_top AS (
+    SELECT
+        cliente_id,
+        canal_id,
+        ROW_NUMBER() OVER (
+            PARTITION BY cliente_id
+            ORDER BY SUM(neto_con_imp) DESC, canal_id
+        ) AS rn
+    FROM base
+    GROUP BY cliente_id, canal_id
 ),
 
 categoria_monto AS (
@@ -140,9 +227,9 @@ marca_top AS (
 
 SELECT
     r.cliente_id,
-    r.localidad_id,
+    lt.localidad_id,
     dl.name AS localidad,
-    r.canal_id,
+    cnt.canal_id,
     dc.name AS canal,
 
     r.recencia,
@@ -160,339 +247,317 @@ SELECT
     ROUND((mt.monto_marca / NULLIF(r.monto_total, 0)) * 100, 2) AS porcentaje_monto_marca_top
 
 FROM rfm r
+LEFT JOIN localidad_top lt
+    ON r.cliente_id = lt.cliente_id AND lt.rn = 1
 LEFT JOIN dim_localidades dl
-    ON r.localidad_id = dl.id
+    ON lt.localidad_id = dl.id
+LEFT JOIN canal_top cnt
+    ON r.cliente_id = cnt.cliente_id AND cnt.rn = 1
 LEFT JOIN dim_canales dc
-    ON r.canal_id = dc.id
+    ON cnt.canal_id = dc.id
 LEFT JOIN categoria_top ct
     ON r.cliente_id = ct.cliente_id AND ct.rn = 1
 LEFT JOIN marca_top mt
     ON r.cliente_id = mt.cliente_id AND mt.rn = 1
 """
 
-df = pd.read_sql(query, engine)
 
-print("Dimensión original:", df.shape)
-print(df.head())
-print(df.isna().sum())
+def cargar_datos(engine):
+    df = pd.read_sql(query, engine)
+
+    print("Dimensión original:", df.shape)
+    print(df.head())
+    print(df.isna().sum())
+
+    df["canal"] = df["canal"].fillna("SIN_CANAL")
+    df["localidad"] = df["localidad"].fillna("SIN_LOCALIDAD")
+
+    return df
 
 
 # =============================================================================
 # PREPARACIÓN DE LA MATRIZ X_final
 # =============================================================================
-variables_cluster = [
-    "recencia",
-    "frecuencia_compra",
-    "monto_total",
-    "variedad_productos",
-    "cantidad_categorias_distintas",
-    "cantidad_marcas_distintas",
-    "porcentaje_monto_categoria_top",
-    "porcentaje_monto_marca_top"
-]
+def preparar_matriz(df):
+    X_num = df[variables_cluster].copy()
 
-X_num = df[variables_cluster].copy()
-print(X_num.head())
+    # Imputación de porcentajes nulos (clientes sin productos con categoría/marca)
+    for col in variables_porcentaje:
+        n_nulos = X_num[col].isna().sum()
+        if n_nulos > 0:
+            mediana = X_num[col].median()
+            X_num[col] = X_num[col].fillna(mediana)
+            print(f"{col}: {n_nulos} valores nulos imputados con la mediana ({mediana:.2f})")
 
-X_num["recencia"] = np.log1p(X_num["recencia"])
-X_num["frecuencia_compra"] = np.log1p(X_num["frecuencia_compra"])
-X_num["monto_total"] = np.log1p(X_num["monto_total"])
-X_num["variedad_productos"] = np.log1p(X_num["variedad_productos"])
-X_num["cantidad_categorias_distintas"] = np.log1p(X_num["cantidad_categorias_distintas"])
-X_num["cantidad_marcas_distintas"] = np.log1p(X_num["cantidad_marcas_distintas"])
+    for col in variables_log:
+        X_num[col] = np.log1p(X_num[col])
 
-print(X_num.head())
+    scaler = RobustScaler()
 
-X_cat = df[["canal", "localidad"]].copy()
-
-X_cat["canal"] = X_cat["canal"].fillna("SIN_CANAL")
-X_cat["localidad"] = X_cat["localidad"].fillna("SIN_LOCALIDAD")
-
-print(X_cat.head())
-
-X_cat_dummies = pd.get_dummies(
-    X_cat,
-    columns=["canal", "localidad"],
-    drop_first=False,
-    dtype=int
-)
-
-print("Dimensión de variables categóricas dummy:", X_cat_dummies.shape)
-print(X_cat_dummies.head())
-
-scaler = RobustScaler()
-
-X_num_scaled = pd.DataFrame(
-    scaler.fit_transform(X_num),
-    columns=X_num.columns,
-    index=X_num.index
-)
-
-print(X_num_scaled.head())
-
-X_final = pd.concat([X_num_scaled, X_cat_dummies], axis=1)
-
-print("Dimensión final de X:", X_final.shape)
-print(X_final.head())
-
-
-# =============================================================================
-# MÉTODO DEL CODO - ELBOW
-# =============================================================================
-k_values = list(range(1, 11))
-inertias = []
-
-for k in k_values:
-    model = KMeans(n_clusters=k, random_state=42, n_init=20)
-    model.fit(X_final)
-    inertias.append(model.inertia_)
-
-resultados = pd.DataFrame({
-    "k": k_values,
-    "inercia": inertias
-})
-
-print(resultados)
-
-kneedle = KneeLocator(
-    k_values,
-    inertias,
-    curve="convex",
-    direction="decreasing"
-)
-
-k_optimo = kneedle.elbow
-print("k óptimo detectado:", k_optimo)
-
-plt.figure(figsize=(10, 6))
-plt.plot(k_values, inertias, marker='o', linewidth=2, label='Inercia')
-
-if k_optimo is not None:
-    y_optimo = inertias[k_values.index(k_optimo)]
-    plt.axvline(x=k_optimo, color='red', linestyle='--', label=f'k óptimo = {k_optimo}')
-    plt.scatter(k_optimo, y_optimo, s=80, color='red')
-    plt.annotate(
-        f'k = {k_optimo}',
-        xy=(k_optimo, y_optimo),
-        xytext=(k_optimo + 0.3, y_optimo + 0.05 * max(inertias)),
-        arrowprops=dict(arrowstyle='->'),
-        fontsize=11
+    X_final = pd.DataFrame(
+        scaler.fit_transform(X_num),
+        columns=X_num.columns,
+        index=X_num.index
     )
 
-plt.xticks(k_values)
-plt.xlabel("Número de clústeres (k)")
-plt.ylabel("Inercia")
-plt.title("Método del codo - RFM + canal + localidad + categorías + marcas")
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.show()
+    if X_final.isna().any().any():
+        raise ValueError("X_final contiene valores nulos; revisar la imputación")
+
+    print("Dimensión final de X:", X_final.shape)
+    print(X_final.head())
+
+    return X_final
 
 
 # =============================================================================
-# SILHOUETTE
+# SELECCIÓN DE k: MÉTODO DEL CODO Y SILHOUETTE
 # =============================================================================
-# Lista para guardar los resultados
-silhouette_scores = []
+def evaluar_k(X_final):
+    sample_size = SILHOUETTE_SAMPLE_SIZE if len(X_final) > SILHOUETTE_SAMPLE_SIZE else None
 
-# Rango de valores de k a evaluar
-K = range(2, 11)
+    modelos = {}
+    filas = []
 
-for k in K:
-    kmeans = KMeans(n_clusters=k, random_state=42, n_init=20)
-    labels = kmeans.fit_predict(X_final)
-    score = silhouette_score(X_final, labels)
-    silhouette_scores.append(score)
-    print(f"k={k} -> silhouette score = {score:.6f}")
+    for k in K_VALUES:
+        model = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=N_INIT)
+        labels = model.fit_predict(X_final)
+        modelos[k] = model
 
-# Gráfico del método de silhouette
-plt.figure(figsize=(8, 5))
-plt.plot(K, silhouette_scores, marker='o')
-plt.xlabel("Número de clusters (k)")
-plt.ylabel("Silhouette Score")
-plt.title("Método de Silhouette para validar el número óptimo de clusters")
-plt.xticks(K)
-plt.grid(True, alpha=0.3)
-plt.show()
+        score = np.nan
+        if k >= 2:
+            score = silhouette_score(X_final, labels, sample_size=sample_size, random_state=RANDOM_STATE)
+            print(f"k={k} -> inercia = {model.inertia_:.2f}, silhouette score = {score:.6f}")
 
-# Mejor k según silhouette
-best_k = K[silhouette_scores.index(max(silhouette_scores))]
-best_score = max(silhouette_scores)
+        filas.append({"k": k, "inercia": model.inertia_, "silhouette": score})
 
-print(f"\nMejor k según silhouette: {best_k}")
-print(f"Mejor silhouette score: {best_score:.6f}")
+    resultados = pd.DataFrame(filas)
+    print(resultados)
+
+    kneedle = KneeLocator(
+        resultados["k"],
+        resultados["inercia"],
+        curve="convex",
+        direction="decreasing"
+    )
+    k_optimo = kneedle.elbow
+
+    mejor = resultados.dropna(subset=["silhouette"]).sort_values("silhouette", ascending=False).iloc[0]
+    best_k = int(mejor["k"])
+    best_score = mejor["silhouette"]
+
+    print(f"\nk óptimo según el codo: {k_optimo}")
+    print(f"Mejor k según silhouette: {best_k} (score = {best_score:.6f})")
+    if k_optimo is not None and k_optimo != best_k:
+        print(f"Los métodos no coinciden: el modelo final usa k = {best_k} (silhouette); "
+              f"el codo (k = {k_optimo}) se usa solo como referencia.")
+
+    return resultados, k_optimo, best_k, modelos
+
+
+def graficar_codo(resultados, k_optimo, ruta):
+    k_values = resultados["k"].tolist()
+    inertias = resultados["inercia"].tolist()
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(k_values, inertias, marker='o', linewidth=2, label='Inercia')
+
+    if k_optimo is not None:
+        y_optimo = inertias[k_values.index(k_optimo)]
+        plt.axvline(x=k_optimo, color='red', linestyle='--', label=f'k óptimo = {k_optimo}')
+        plt.scatter(k_optimo, y_optimo, s=80, color='red')
+        plt.annotate(
+            f'k = {k_optimo}',
+            xy=(k_optimo, y_optimo),
+            xytext=(k_optimo + 0.3, y_optimo + 0.05 * max(inertias)),
+            arrowprops=dict(arrowstyle='->'),
+            fontsize=11
+        )
+
+    plt.xticks(k_values)
+    plt.xlabel("Número de clústeres (k)")
+    plt.ylabel("Inercia")
+    plt.title("Método del codo - variables RFM, variedad y concentración de compra")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.savefig(ruta, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def graficar_silhouette(resultados, best_k, ruta, k_final=None):
+    datos = resultados.dropna(subset=["silhouette"])
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(datos["k"], datos["silhouette"], marker='o')
+    plt.axvline(x=best_k, color='red', linestyle='--', label=f'Mejor k = {best_k}')
+    if k_final is not None and k_final != best_k:
+        plt.axvline(x=k_final, color='green', linestyle='--', label=f'k elegido = {k_final}')
+    plt.xlabel("Número de clusters (k)")
+    plt.ylabel("Silhouette Score")
+    plt.title("Método de Silhouette para validar el número óptimo de clusters")
+    plt.xticks(datos["k"])
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.savefig(ruta, dpi=150, bbox_inches="tight")
+    plt.close()
 
 
 # =============================================================================
-# MODELO K-MEANS
+# PERFILADO DE CLÚSTERES
 # =============================================================================
-kmeans = KMeans(n_clusters=best_k, random_state=42, n_init=20)
-df["cluster"] = kmeans.fit_predict(X_final)
+def moda(serie):
+    return serie.value_counts().index[0] if serie.notna().any() else "SIN_DATO"
 
-print(df.head())
 
-conteo_clusters = df["cluster"].value_counts().sort_index()
-print(conteo_clusters)
+def perfilar_clusters(df):
+    agrupado = df.groupby("cluster")
 
-perfil_clusters = df.groupby("cluster")[variables_cluster].mean().round(2)
+    # Se usan medianas: monto_total y frecuencia_compra están muy sesgadas
+    resumen_clusters = pd.concat(
+        [
+            agrupado.size().rename("cantidad_clientes"),
+            (agrupado.size() / len(df) * 100).round(2).rename("porcentaje_clientes"),
+            agrupado[variables_cluster].median().round(2),
+            agrupado[list(variables_descriptivas)].agg(moda).rename(columns=variables_descriptivas)
+        ],
+        axis=1
+    )
 
-print(perfil_clusters)
+    print("\nResumen por clúster (medianas y valores predominantes):")
+    print(resumen_clusters)
 
-canal_por_cluster = (
-    df.groupby("cluster")["canal"]
-    .agg(lambda x: x.value_counts().index[0])
-    .reset_index()
-)
-canal_por_cluster.columns = ["cluster", "canal_predominante"]
+    # Detalle con media, mediana, mínimo y máximo
+    tabla_clusters = agrupado[variables_cluster].agg(["mean", "median", "min", "max"]).round(2)
+    print(tabla_clusters)
 
-localidad_por_cluster = (
-    df.groupby("cluster")["localidad"]
-    .agg(lambda x: x.value_counts().index[0])
-    .reset_index()
-)
-localidad_por_cluster.columns = ["cluster", "localidad_predominante"]
+    return resumen_clusters, tabla_clusters
 
-print(canal_por_cluster)
-print(localidad_por_cluster)
 
-categoria_por_cluster = (
-    df.groupby("cluster")["categoria_predominante"]
-    .agg(lambda x: x.value_counts().index[0] if x.notna().any() else "SIN_DATO")
-    .reset_index()
-)
-categoria_por_cluster.columns = ["cluster", "categoria_predominante_cluster"]
+def graficar_pca(X_final, df, kmeans, ruta):
+    pca = PCA(n_components=2, random_state=RANDOM_STATE)
+    X_pca = pca.fit_transform(X_final)
 
-marca_por_cluster = (
-    df.groupby("cluster")["marca_predominante"]
-    .agg(lambda x: x.value_counts().index[0] if x.notna().any() else "SIN_DATO")
-    .reset_index()
-)
-marca_por_cluster.columns = ["cluster", "marca_predominante_cluster"]
+    varianza = pca.explained_variance_ratio_
+    print(f"\nVarianza explicada por PCA: PC1 = {varianza[0]:.2%}, PC2 = {varianza[1]:.2%}, "
+          f"total = {varianza.sum():.2%}")
 
-print(categoria_por_cluster)
-print(marca_por_cluster)
+    # Centroides con nombres de columnas correctos
+    centroides_df = pd.DataFrame(
+        kmeans.cluster_centers_,
+        columns=X_final.columns
+    )
+    centroides_pca = pca.transform(centroides_df)
 
-conteo_clusters_df = df["cluster"].value_counts().sort_index().reset_index()
-conteo_clusters_df.columns = ["cluster", "cantidad_clientes"]
+    plt.figure(figsize=(11, 7))
 
-porcentaje_clusters = (
-    df["cluster"]
-    .value_counts(normalize=True)
-    .sort_index()
-    .mul(100)
-    .round(2)
-    .reset_index()
-)
-porcentaje_clusters.columns = ["cluster", "porcentaje_clientes"]
+    plt.scatter(
+        X_pca[:, 0],
+        X_pca[:, 1],
+        c=df["cluster"],
+        cmap="viridis",
+        alpha=0.7
+    )
 
-resumen_clusters = (
-    perfil_clusters.reset_index()
-    .merge(conteo_clusters_df, on="cluster")
-    .merge(porcentaje_clusters, on="cluster")
-    .merge(canal_por_cluster, on="cluster")
-    .merge(localidad_por_cluster, on="cluster")
-    .merge(categoria_por_cluster, on="cluster")
-    .merge(marca_por_cluster, on="cluster")
-)
+    plt.scatter(
+        centroides_pca[:, 0],
+        centroides_pca[:, 1],
+        s=350,
+        marker="X",
+        c="red",
+        edgecolors="black",
+        label="Centroides"
+    )
 
-print(resumen_clusters)
+    plt.title(f"Segmentación de clientes mediante K-Means "
+              f"(PCA: {varianza.sum():.1%} de la varianza explicada)")
+    plt.xlabel(f"Componente principal 1 ({varianza[0]:.1%})")
+    plt.ylabel(f"Componente principal 2 ({varianza[1]:.1%})")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(ruta, dpi=150, bbox_inches="tight")
+    plt.close()
 
-# PCA
-pca = PCA(n_components=2, random_state=42)
-X_pca = pca.fit_transform(X_final)
-
-# Datos para gráfico
-df_plot = pd.DataFrame(X_pca, columns=["PC1", "PC2"], index=df.index)
-df_plot["cluster"] = df["cluster"]
-
-# Centroides con nombres de columnas correctos
-centroides_df = pd.DataFrame(
-    kmeans.cluster_centers_,
-    columns=X_final.columns
-)
-centroides_pca = pca.transform(centroides_df)
-
-# Visualización
-plt.figure(figsize=(11, 7))
-
-scatter = plt.scatter(
-    df_plot["PC1"],
-    df_plot["PC2"],
-    c=df_plot["cluster"],
-    cmap="viridis",
-    alpha=0.7
-)
-
-plt.scatter(
-    centroides_pca[:, 0],
-    centroides_pca[:, 1],
-    s=350,
-    marker="X",
-    c="red",
-    edgecolors="black",
-    label="Centroides"
-)
-
-plt.title("Segmentación de clientes mediante K-Means")
-plt.xlabel("Componente principal 1")
-plt.ylabel("Componente principal 2")
-plt.legend()
-plt.grid(True, alpha=0.3)
-plt.show()
-
-# Tabla resumen por cluster
-tabla_clusters = df.groupby("cluster")[variables_cluster].agg([
-    "mean",
-    "median",
-    "min",
-    "max"
-]).round(2)
-
-print(tabla_clusters)
-
-# Cantidad de clientes por cluster
-cantidad_clientes = df.groupby("cluster").size().rename("cantidad_clientes")
-
-# Promedio de variables por cluster
-promedios_clusters = df.groupby("cluster")[variables_cluster].mean().round(2)
-
-# Unir en una sola tabla
-tabla_resumen = pd.concat([cantidad_clientes, promedios_clusters], axis=1)
-
-print(tabla_resumen)
+    return varianza
 
 
 # =============================================================================
 # EXPORTAR MUESTRA DE X_final COMO IMAGEN
 # =============================================================================
-# Seleccionar una muestra pequeña de X_final
-tabla_xfinal = X_final.head(8).iloc[:, :10].copy()
+def exportar_muestra_xfinal(X_final, ruta):
+    # Seleccionar una muestra pequeña de X_final y redondear para que se vea mejor
+    tabla_xfinal = X_final.head(8).iloc[:, :10].round(3)
 
-# Redondear valores para que se vea mejor
-tabla_xfinal = tabla_xfinal.round(3)
+    fig, ax = plt.subplots(figsize=(14, 4))
+    ax.axis("off")
 
-# Crear figura
-fig, ax = plt.subplots(figsize=(14, 4))
-ax.axis("off")
+    tabla = ax.table(
+        cellText=tabla_xfinal.values,
+        # Nombres partidos en varias líneas para que no se superpongan
+        colLabels=[col.replace("_", "\n") for col in tabla_xfinal.columns],
+        rowLabels=tabla_xfinal.index,
+        cellLoc="center",
+        loc="center"
+    )
 
-tabla = ax.table(
-    cellText=tabla_xfinal.values,
-    colLabels=tabla_xfinal.columns,
-    rowLabels=tabla_xfinal.index,
-    cellLoc="center",
-    loc="center"
-)
+    tabla.auto_set_font_size(False)
+    tabla.set_fontsize(8)
+    tabla.scale(1, 1.4)
+    for (fila, _), celda in tabla.get_celld().items():
+        if fila == 0:
+            celda.set_height(celda.get_height() * 3)
 
-tabla.auto_set_font_size(False)
-tabla.set_fontsize(8)
-tabla.scale(1, 1.4)
+    plt.title("Vista parcial de la matriz analítica final X_final", fontsize=12, pad=15)
+    plt.tight_layout()
+    plt.savefig(ruta, dpi=300, bbox_inches="tight")
+    plt.close()
 
-plt.title("Vista parcial de la matriz analítica final X_final", fontsize=12, pad=15)
-plt.tight_layout()
+    print(f"Imagen guardada en: {ruta}")
 
-# Guardar en la carpeta Descargas
-ruta_descargas = Path.home() / "Downloads" / "xfinal_muestra.png"
 
-plt.savefig(ruta_descargas, dpi=300, bbox_inches="tight")
-plt.show()
+# =============================================================================
+# PROGRAMA PRINCIPAL
+# =============================================================================
+def main():
+    parser = argparse.ArgumentParser(description="Segmentación de clientes con K-Means")
+    parser.add_argument("--salida", default="resultados",
+                        help="Carpeta donde se guardan gráficos y tablas (por defecto: resultados)")
+    parser.add_argument("--k", type=int, choices=K_VALUES[1:],
+                        help="Fija el número de clústeres del modelo final "
+                             "(por defecto: el de mejor silhouette)")
+    args = parser.parse_args()
 
-print(f"Imagen guardada en: {ruta_descargas}")
+    salida = Path(args.salida)
+    salida.mkdir(parents=True, exist_ok=True)
+
+    engine = crear_engine()
+    df = cargar_datos(engine)
+    X_final = preparar_matriz(df)
+
+    resultados, k_optimo, best_k, modelos = evaluar_k(X_final)
+    graficar_codo(resultados, k_optimo, salida / "01_codo.png")
+    graficar_silhouette(resultados, best_k, salida / "02_silhouette.png", args.k)
+
+    # Modelo final: el de mejor silhouette (o el k fijado con --k), ya entrenado en evaluar_k
+    k_final = best_k
+    if args.k is not None:
+        k_final = args.k
+        score = resultados.loc[resultados["k"] == k_final, "silhouette"].iloc[0]
+        print(f"\nk fijado manualmente: {k_final} (silhouette = {score:.6f}); "
+              f"el mejor según silhouette es k = {best_k}")
+
+    kmeans = modelos[k_final]
+    df["cluster"] = kmeans.labels_
+
+    resumen_clusters, tabla_clusters = perfilar_clusters(df)
+    graficar_pca(X_final, df, kmeans, salida / "03_pca_clusters.png")
+    exportar_muestra_xfinal(X_final, salida / "04_xfinal_muestra.png")
+
+    resultados.to_csv(salida / "metricas_k.csv", index=False)
+    resumen_clusters.to_csv(salida / "resumen_clusters.csv")
+    tabla_clusters.to_csv(salida / "detalle_clusters.csv")
+    df[["cliente_id", "cluster"]].to_csv(salida / "clientes_cluster.csv", index=False)
+
+    print(f"\nResultados guardados en: {salida.resolve()}")
+
+
+if __name__ == "__main__":
+    main()
