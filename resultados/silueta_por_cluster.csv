@@ -1,0 +1,3 @@
+cluster,cantidad_clientes,silueta_media,silueta_mediana,porcentaje_negativos
+0,3367,0.6724,0.7298,0.0
+1,390,0.4083,0.5049,5.641
