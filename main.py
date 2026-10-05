@@ -467,6 +467,18 @@ def graficar_pca(X_final, df, kmeans, ruta):
         label="Centroides"
     )
 
+    # Etiqueta junto a cada centroide; el índice coincide con el número de clúster
+    for cluster, (x, y) in enumerate(centroides_pca):
+        plt.annotate(
+            f"Cluster {cluster}",
+            xy=(x, y),
+            xytext=(14, 10),
+            textcoords="offset points",
+            fontsize=11,
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="black", alpha=0.85)
+        )
+
     plt.title(f"Segmentación de clientes mediante K-Means "
               f"(PCA: {varianza.sum():.1%} de la varianza explicada)")
     plt.xlabel(f"Componente principal 1 ({varianza[0]:.1%})")
@@ -561,6 +573,68 @@ def validar_estabilidad(X_final, k_final, k_comparar=(2, 3, 4)):
     return detalle.round(4), resumen, jaccard
 
 
+COLORES_PRUEBA = {"semilla": "#2a78d6", "submuestra": "#eb6834"}
+NOMBRES_PRUEBA = {"semilla": "Otras semillas (10, todos los clientes)",
+                  "submuestra": "Submuestras del 80 % (20)"}
+
+
+def graficar_puntos_estabilidad(ax, grupos, etiquetas):
+    # grupos: lista (una entrada por posición en x) de dicts {prueba: valores}
+    desplazamiento = {"semilla": -0.18, "submuestra": 0.18}
+    rng = np.random.default_rng(RANDOM_STATE)
+    for prueba, color in COLORES_PRUEBA.items():
+        for pos, grupo in enumerate(grupos):
+            valores = np.asarray(grupo[prueba])
+            x = pos + desplazamiento[prueba] + rng.uniform(-0.06, 0.06, len(valores))
+            ax.scatter(x, valores, s=36, color=color, alpha=0.55, edgecolors="white", linewidths=0.8,
+                       label=NOMBRES_PRUEBA[prueba] if pos == 0 else None, zorder=3)
+            media = valores.mean()
+            ax.hlines(media, pos + desplazamiento[prueba] - 0.13, pos + desplazamiento[prueba] + 0.13,
+                      color="#0b0b0b", linewidth=2, zorder=4)
+            ax.annotate(f"{media:.3f}", xy=(pos + desplazamiento[prueba] + 0.13, media),
+                        xytext=(3, 0), textcoords="offset points", ha="left", va="center",
+                        fontsize=9, fontweight="bold", color="#0b0b0b")
+    ax.set_xticks(range(len(etiquetas)))
+    ax.set_xticklabels(etiquetas)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.spines[["top", "right"]].set_visible(False)
+
+
+def graficar_estabilidad(detalle, k_final, ruta_ari, ruta_jaccard):
+    # ARI por k: cada punto es una repetición, la línea negra es la media
+    valores_k = sorted(detalle["k"].unique())
+    grupos = [{p: detalle[(detalle["k"] == k) & (detalle["prueba"] == p)]["ari"] for p in COLORES_PRUEBA}
+              for k in valores_k]
+    etiquetas = [f"k = {k}" + (" (final)" if k == k_final else "") for k in valores_k]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    graficar_puntos_estabilidad(ax, grupos, etiquetas)
+    ax.set_ylim(min(0.9, detalle["ari"].min() - 0.01), 1.005)
+    ax.set_title("Estabilidad de K-Means: ARI respecto al modelo de referencia (random_state=42)")
+    ax.set_xlabel("Número de clústeres")
+    ax.set_ylabel("Índice Rand Ajustado (ARI)\n(eje recortado: el ARI vale 1 como máximo y puede ser negativo)")
+    ax.legend(title="Línea negra y valor: media", loc="lower left", frameon=False)
+    fig.savefig(ruta_ari, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # Jaccard por clúster para el k final
+    final = detalle[detalle["k"] == k_final]
+    clusters = range(k_final)
+    grupos = [{p: final[final["prueba"] == p][f"jaccard_cluster_{c}"] for p in COLORES_PRUEBA}
+              for c in clusters]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    graficar_puntos_estabilidad(ax, grupos, [f"Cluster {c}" for c in clusters])
+    minimo = min(final[f"jaccard_cluster_{c}"].min() for c in clusters)
+    ax.set_ylim(min(0.9, minimo - 0.01), 1.005)
+    ax.set_title(f"Estabilidad por clúster (k = {k_final}): índice de Jaccard máximo frente a cada repetición")
+    ax.set_xlabel("Clúster del modelo de referencia")
+    ax.set_ylabel("Índice de Jaccard\n(eje recortado: la escala completa va de 0 a 1)")
+    ax.legend(title="Línea negra y valor: media", loc="lower left", frameon=False)
+    fig.savefig(ruta_jaccard, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 # =============================================================================
 # EXPORTAR MUESTRA DE X_final COMO IMAGEN
 # =============================================================================
@@ -635,6 +709,8 @@ def main():
 
     silueta_clusters = silueta_por_cluster(X_final, kmeans.labels_)
     estabilidad_detalle, estabilidad_resumen, estabilidad_jaccard = validar_estabilidad(X_final, k_final)
+    graficar_estabilidad(estabilidad_detalle, k_final,
+                         salida / "05_estabilidad_ari.png", salida / "06_estabilidad_jaccard.png")
 
     silueta_clusters.to_csv(salida / "silueta_por_cluster.csv")
     estabilidad_detalle.to_csv(salida / "estabilidad_detalle.csv", index=False)
