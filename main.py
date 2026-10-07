@@ -509,6 +509,43 @@ def silueta_por_cluster(X_final, labels):
     return tabla
 
 
+def graficar_silueta_clientes(X_final, labels, ruta):
+    # Una barra horizontal por cliente, ordenadas de mayor a menor dentro de cada clúster
+    valores = silhouette_samples(X_final, labels)
+    clusters = np.unique(labels)
+    # Mismos colores que el gráfico PCA (viridis normalizado entre el primer y el último clúster)
+    cmap = plt.get_cmap("viridis")
+    hueco = max(10, len(labels) // 60)
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    y_inferior = hueco
+    # Se dibuja de abajo hacia arriba: el último clúster abajo para que el 0 quede arriba
+    for c in clusters[::-1]:
+        valores_c = np.sort(valores[labels == c])
+        y_superior = y_inferior + len(valores_c)
+        color = cmap(c / max(len(clusters) - 1, 1))
+        ax.fill_betweenx(np.arange(y_inferior, y_superior), 0, valores_c,
+                         facecolor=color, edgecolor=color, alpha=0.85)
+        ax.text(-0.02, (y_inferior + y_superior) / 2, f"Cluster {c}\n({valores_c.mean():.3f})",
+                transform=ax.get_yaxis_transform(), ha="right", va="center",
+                fontsize=10, fontweight="bold")
+        y_inferior = y_superior + hueco
+
+    media = valores.mean()
+    ax.axvline(media, color="red", linestyle="--", label=f"Silhouette media = {media:.3f}")
+    ax.axvline(0, color="black", linewidth=0.8)
+    ax.set_xlim(min(-0.1, valores.min() - 0.02), 1)
+    ax.set_ylim(0, y_inferior)
+    ax.set_yticks([])
+    ax.tick_params(axis="x", top=True, labeltop=True)
+    ax.set_xlabel("Coeficiente de silueta")
+    ax.set_title(f"Gráfico de silueta por cliente (k = {len(clusters)})", pad=30)
+    ax.grid(True, axis="x", alpha=0.3)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.1), frameon=False)
+    fig.savefig(ruta, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def jaccard_por_cluster(labels_base, labels_nuevas):
     # Para cada clúster original, el mayor Jaccard contra algún clúster de la nueva partición
     resultado = {}
@@ -622,7 +659,7 @@ def graficar_estabilidad(detalle, k_final, ruta_ari, ruta_jaccard):
               for k in valores_k]
     etiquetas = [f"k = {k}" + (" (final)" if k == k_final else "") for k in valores_k]
 
-    fig, ax = plt.subplots(figsize=(12, 6.5))
+    fig, ax = plt.subplots(figsize=(max(12, 3.6 * len(grupos)), 6.5))
     graficar_puntos_estabilidad(ax, grupos, etiquetas)
     ax.set_ylim(min(0.9, detalle["ari"].min() - 0.01), 1.005)
     ax.set_title("Estabilidad de K-Means: ARI respecto al modelo de referencia (random_state=42)")
@@ -639,7 +676,7 @@ def graficar_estabilidad(detalle, k_final, ruta_ari, ruta_jaccard):
     grupos = [{p: final[final["prueba"] == p][f"jaccard_cluster_{c}"] for p in COLORES_PRUEBA}
               for c in clusters]
 
-    fig, ax = plt.subplots(figsize=(12, 6.5))
+    fig, ax = plt.subplots(figsize=(max(12, 3.6 * len(grupos)), 6.5))
     graficar_puntos_estabilidad(ax, grupos, [f"Cluster {c}" for c in clusters])
     minimo = min(final[f"jaccard_cluster_{c}"].min() for c in clusters)
     ax.set_ylim(min(0.9, minimo - 0.01), 1.005)
@@ -725,6 +762,7 @@ def main():
     exportar_muestra_xfinal(X_final, salida / "04_xfinal_muestra.png")
 
     silueta_clusters = silueta_por_cluster(X_final, kmeans.labels_)
+    graficar_silueta_clientes(X_final, kmeans.labels_, salida / "07_silueta_clientes.png")
     estabilidad_detalle, estabilidad_resumen, estabilidad_jaccard = validar_estabilidad(X_final, k_final)
     graficar_estabilidad(estabilidad_detalle, k_final,
                          salida / "05_estabilidad_ari.png", salida / "06_estabilidad_jaccard.png")

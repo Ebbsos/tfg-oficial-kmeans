@@ -1,0 +1,6 @@
+,jaccard_cluster_0,jaccard_cluster_0,jaccard_cluster_1,jaccard_cluster_1,jaccard_cluster_2,jaccard_cluster_2,jaccard_cluster_3,jaccard_cluster_3,jaccard_cluster_4,jaccard_cluster_4
+,mean,min,mean,min,mean,min,mean,min,mean,min
+prueba,,,,,,,,,,
+bootstrap,0.9022,0.7241,0.9371,0.6715,0.9589,0.5625,0.8349,0.3986,0.9426,0.4212
+semilla,0.9946,0.9814,0.9952,0.9758,0.9948,0.9898,0.9863,0.952,0.9926,0.9859
+submuestra,0.965,0.8526,0.979,0.8841,0.9835,0.9609,0.9354,0.6651,0.9742,0.9443

@@ -1,0 +1,6 @@
+cluster,cantidad_clientes,porcentaje_clientes,recencia,frecuencia_compra,monto_total,variedad_productos,cantidad_categorias_distintas,cantidad_marcas_distintas,porcentaje_monto_categoria_top,porcentaje_monto_marca_top,canal_predominante,localidad_predominante,categoria_predominante_cluster,marca_predominante_cluster
+0,739,19.67,344.0,53.0,2476119.09,69.0,11.0,16.0,45.6,30.33,DESPENSAS B,Ciudad del Este,LAUNDRY,OMO
+1,207,5.51,106.0,1.0,121290.0,3.0,2.0,2.0,93.09,74.59,DESPENSAS B,Ciudad del Este,LAUNDRY,OMO
+2,1354,36.04,3.0,184.5,17869586.27,230.0,14.0,22.0,50.38,31.86,DESPENSAS B,Ciudad del Este,LAUNDRY,OMO
+3,391,10.41,13.0,14.0,714877.44,21.0,7.0,10.0,55.02,41.65,DESPENSAS C,Ciudad del Este,LAUNDRY,OMO
+4,1066,28.37,3.0,178.0,22018512.91,174.0,14.0,21.0,72.79,51.14,DESPENSAS B,Ciudad del Este,LAUNDRY,OMO
