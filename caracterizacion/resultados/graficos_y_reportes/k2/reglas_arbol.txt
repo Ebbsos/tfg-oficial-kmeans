@@ -1,0 +1,21 @@
+Acierto del árbol frente a K-Means: 0.9944
+
+|--- cantidad_marcas_distintas <= 9.50
+|   |--- cantidad_marcas_distintas <= 8.50
+|   |   |--- class: Cluster 1
+|   |--- cantidad_marcas_distintas >  8.50
+|   |   |--- porcentaje_monto_categoria_top <= 58.63
+|   |   |   |--- class: Cluster 1
+|   |   |--- porcentaje_monto_categoria_top >  58.63
+|   |   |   |--- class: Cluster 1
+|--- cantidad_marcas_distintas >  9.50
+|   |--- cantidad_categorias_distintas <= 7.50
+|   |   |--- variedad_productos <= 22.50
+|   |   |   |--- class: Cluster 1
+|   |   |--- variedad_productos >  22.50
+|   |   |   |--- class: Cluster 0
+|   |--- cantidad_categorias_distintas >  7.50
+|   |   |--- monto_total <= 359953.78
+|   |   |   |--- class: Cluster 0
+|   |   |--- monto_total >  359953.78
+|   |   |   |--- class: Cluster 0

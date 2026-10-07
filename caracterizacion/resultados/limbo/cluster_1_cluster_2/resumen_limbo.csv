@@ -1,0 +1,5 @@
+cluster_actual,nivel_limbo,clientes,margen_medio,silueta_media,probabilidad_cambio_media
+1,cercano (5%-10%),6,0.0723,0.0928,0.0
+1,crítico (margen < 5%),1,0.0355,0.0852,0.02
+2,cercano (5%-10%),14,0.08,0.0109,0.1229
+2,crítico (margen < 5%),8,0.0285,-0.0265,0.345
